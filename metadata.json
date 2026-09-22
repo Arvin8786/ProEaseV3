@@ -1,0 +1,11 @@
+{
+  "name": "ProEase v3.5 Workspace",
+  "description": "Premium career workspace with AI-powered document generation and interview preparation.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

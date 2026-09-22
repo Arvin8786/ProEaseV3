@@ -1,0 +1,194 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // 0. Global Safety Net - Default Deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && (request.auth.token.email_verified == true || request.auth.providerId == "google.com");
+    }
+
+    function authEmail() {
+      return request.auth.token.get('email', '').lower();
+    }
+
+    function isOwnerAccount() {
+      return isSignedIn() && authEmail() == "arvin8786@gmail.com";
+    }
+
+    function isModerator() {
+      return isSignedIn() && (
+        isOwnerAccount() || 
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == "moderator")
+      );
+    }
+
+    function isAdmin() {
+      return isModerator();
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+       return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-\\.]+$');
+    }
+
+    // ===============================================================
+    // Validation Schemas (Anti-Update-Gap)
+    // ===============================================================
+
+    function isValidUserProfile(data) {
+      return data.keys().hasAll(['uid', 'email', 'plan']) &&
+             data.uid is string && data.uid == request.auth.uid &&
+             data.email is string && data.email.size() <= 150 &&
+             data.plan in ['freeTrial', 'free', 'pro', 'enterprise'];
+    }
+
+    function isValidDocument(data) {
+      return data.keys().hasAll(['title', 'type', 'content']) &&
+             data.title is string && data.title.size() <= 200 &&
+             data.content is string && data.content.size() <= 100000;
+    }
+
+    function isValidGeneratedDoc(data) {
+      return data.keys().hasAll(['title', 'type', 'content', 'params', 'createdAt']) &&
+             data.title is string &&
+             data.type in ['resume', 'cover_letter', 'resignation'] &&
+             data.content is string && data.content.size() <= 100000 &&
+             data.createdAt == request.time;
+    }
+
+    function isValidScheduledMessage(data) {
+      return data.keys().hasAll(['userId', 'recipientPhone', 'message', 'scheduledAt', 'status', 'createdAt']) &&
+             data.userId == request.auth.uid &&
+             data.recipientPhone is string && data.recipientPhone.size() <= 32 &&
+             data.message is string && data.message.size() <= 2000 &&
+             data.status in ['pending', 'sent', 'cancelled'] &&
+             data.createdAt == request.time;
+    }
+
+    function isValidUploadedDocument(data) {
+      return data.keys().hasAll(['userId', 'category', 'title', 'fileName', 'fileData']) &&
+             data.userId == request.auth.uid &&
+             data.title is string && data.title.size() <= 200 &&
+             data.fileName is string && data.fileName.size() <= 255;
+    }
+
+    // ===============================================================
+    // Collection Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow get: if isOwner(userId) || isAdmin();
+      allow list: if isAdmin();
+      
+      allow create: if (isOwner(userId) || isAdmin()) && isValidUserProfile(incoming());
+      
+      allow update: if (isOwner(userId) && (
+        // Standard user update: cannot change core identity fields
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'displayName', 'photoURL', 'nationality', 'visaStatus', 'dateOfBirth', 'gender', 
+          'linkedin', 'experience', 'education', 'skills', 'languages', 'references', 
+          'professionalSummary', 'updatedAt', 'activities', 'address', 'phone', 'website',
+          'projects', 'certifications', 'signatureURL'
+        ]) &&
+        incoming().uid == existing().uid &&
+        incoming().email == existing().email &&
+        incoming().get('plan', 'freeTrial') == existing().get('plan', 'freeTrial') &&
+        incoming().get('isAdmin', false) == existing().get('isAdmin', false)
+      )) || isAdmin();
+
+      match /documents/{docId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create, update: if (isOwner(userId) && isValidDocument(incoming())) || isAdmin();
+        allow delete: if isOwner(userId) || isAdmin();
+      }
+
+      match /generated_documents/{docId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create: if isOwner(userId) && isValidGeneratedDoc(incoming());
+        allow update: if (isOwner(userId) && (
+          incoming().diff(existing()).affectedKeys().hasOnly(['title', 'content', 'params', 'updatedAt']) &&
+          incoming().createdAt == existing().createdAt
+        )) || isAdmin();
+        allow delete: if isOwner(userId) || isAdmin();
+      }
+
+      match /scheduled_messages/{msgId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create: if isOwner(userId) && isValidScheduledMessage(incoming());
+        allow update: if isOwner(userId) && (
+          incoming().diff(existing()).affectedKeys().hasOnly(['status', 'scheduledAt', 'message'])
+        );
+        allow delete: if isOwner(userId) || isAdmin();
+      }
+
+      match /uploaded_documents/{docId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create, update: if (isOwner(userId) && isValidUploadedDocument(incoming())) || isAdmin();
+        allow delete: if isOwner(userId) || isAdmin();
+      }
+    }
+
+    match /admin_config/{configId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    match /whitelist/{email} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    match /blocked_emails/{email} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    match /access_requests/{email} {
+      allow read: if isSignedIn() && (authEmail() == email.lower() || isAdmin());
+      allow create: if isSignedIn() && authEmail() == email.lower();
+      allow update, delete: if isAdmin();
+    }
+
+    match /payment_requests/{requestId} {
+      allow read: if isSignedIn() && (resource.data.uid == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() && incoming().uid == request.auth.uid;
+      allow update, delete: if isAdmin();
+    }
+
+    match /document_requests/{requestId} {
+      allow read: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() && incoming().userId == request.auth.uid;
+      allow update: if (isSignedIn() && resource.data.userId == request.auth.uid && 
+        incoming().diff(existing()).affectedKeys().hasOnly(['paymentStatus', 'paymentProofRef', 'paymentReference', 'paymentProofUrl', 'updatedAt'])) || isAdmin();
+      allow delete: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+    }
+
+    match /api_keys/{keyId} {
+      allow read, write: if isAdmin();
+    }
+  }
+}
